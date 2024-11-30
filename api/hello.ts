@@ -1,195 +1,101 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-const puppeteer = require('puppeteer');
-const fs = require('fs').promises;
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 
-export default function handler(req: VercelRequest, res: VercelResponse) {
-
-
-
-
-  
-  const { name = 'World' } = req.query
-  return res.json({
-    message: `Hello ${name}!`,
-  })
-}
-
-
-
-class AliExpressScraper {
-    constructor(options = {}) {
-        this.browser = null;
-        this.page = null;
-        this.defaultOptions = {
-            headless: true,
-            searchTerm: '',
-            minPrice: null,
-            maxPrice: null,
-            minOrderCount: null,
-            shippingCountry: null,
-            maxPages: 3,
-            outputFile: 'aliexpress_products.json'
-        };
-        this.options = { ...this.defaultOptions, ...options };
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+    // Validate request method
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    async initialize() {
-        this.browser = await puppeteer.launch({
-            headless: this.options.headless,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ]
+    // Extract scraping options from request body
+    const { 
+        searchTerm = 'smartphone', 
+        minPrice = 100, 
+        maxPrice = 500, 
+        minOrderCount = 50, 
+        maxPages = 3 
+    } = req.body;
+
+    try {
+        const browser = await puppeteer.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
         });
-        this.page = await this.browser.newPage();
 
-        await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        const page = await browser.newPage();
 
-        await this.page.setRequestInterception(true);
-        this.page.on('request', (request) => {
-            const resourceType = request.resourceType();
-            const blockedResources = ['image', 'stylesheet', 'font'];
-
-            if (blockedResources.includes(resourceType)) {
-                request.abort();
-            } else {
-                request.continue();
-            }
-        });
-    }
-
-    async buildSearchURL() {
-        let baseURL = 'https://www.aliexpress.com/wholesale';
+        // Build search URL
+        const baseURL = 'https://www.aliexpress.com/wholesale';
         const params = new URLSearchParams();
+        params.append('SearchText', encodeURIComponent(searchTerm));
+        
+        if (minPrice) params.append('minPrice', minPrice.toString());
+        if (maxPrice) params.append('maxPrice', maxPrice.toString());
 
-        params.append('SearchText', encodeURIComponent(this.options.searchTerm));
+        const searchURL = `${baseURL}?${params.toString()}`;
 
-        if (this.options.minPrice) {
-            params.append('minPrice', this.options.minPrice);
-        }
-        if (this.options.maxPrice) {
-            params.append('maxPrice', this.options.maxPrice);
-        }
+        // Navigate to search page
+        await page.goto(searchURL, { 
+            waitUntil: 'networkidle0',
+            timeout: 60000 
+        });
 
-        return `${baseURL}?${params.toString()}`;
-    }
+        // Scrape products
+        const products = await page.evaluate((options) => {
+            const productElements = document.querySelectorAll('.product-item');
+            return Array.from(productElements).map(el => {
+                const titleEl = el.querySelector('.product-title');
+                const priceEl = el.querySelector('.price');
+                const orderCountEl = el.querySelector('.orders-count');
+                const ratingEl = el.querySelector('.rating');
 
-    async scrapeProducts() {
-        await this.initialize();
-        const searchURL = await this.buildSearchURL();
+                const orderCount = orderCountEl ? 
+                    parseInt(orderCountEl.innerText.replace(/\D/g, ''), 10) || 0 
+                    : 0;
 
-        const products = [];
-
-        try {
-            await this.page.goto(searchURL, {
-                waitUntil: 'networkidle0',
-                timeout: 60000
-            });
-
-            await this.page.waitForSelector('.product-item', { timeout: 10000 });
-
-            for (let pageNum = 1; pageNum <= this.options.maxPages; pageNum++) {
-                const pageProducts = await this.page.evaluate((options) => {
-                    const productElements = document.querySelectorAll('.product-item');
-                    return Array.from(productElements).map(el => {
-                        const titleEl = el.querySelector('.product-title');
-                        const priceEl = el.querySelector('.price');
-                        const orderCountEl = el.querySelector('.orders-count');
-                        const ratingEl = el.querySelector('.rating');
-
-                        return {
-                            id: el.getAttribute('data-product-id') || 'N/A',
-                            title: titleEl ? titleEl.innerText.trim() : 'N/A',
-                            price: priceEl ? priceEl.innerText.trim() : 'N/A',
-                            orderCount: orderCountEl ? orderCountEl.innerText.trim() : '0',
-                            rating: ratingEl ? ratingEl.innerText.trim() : 'N/A',
-                            link: el.querySelector('a') ? el.querySelector('a').href : 'N/A',
-                            scraped_at: new Date().toISOString()
-                        };
-                    }).filter(product => {
-                        const orderCount = parseInt(product.orderCount.replace(/\D/g, ''), 10) || 0;
-                        return options.minOrderCount ? orderCount >= options.minOrderCount : true;
-                    });
-                }, this.options);
-
-                products.push(...pageProducts);
-
-                const nextPageButton = await this.page.$('.next-page');
-                if (nextPageButton && pageNum < this.options.maxPages) {
-                    await nextPageButton.click();
-                    await this.page.waitForTimeout(2000);
-                } else {
-                    break;
+                // Apply order count filter
+                if (options.minOrderCount && orderCount < options.minOrderCount) {
+                    return null;
                 }
-            }
-        } catch (error) {
-            console.error('Scraping error:', error);
-        } finally {
-            await this.browser.close();
-        }
 
-        return products;
-    }
+                return {
+                    id: el.getAttribute('data-product-id') || 'N/A',
+                    title: titleEl ? titleEl.innerText.trim() : 'N/A',
+                    price: priceEl ? priceEl.innerText.trim() : 'N/A',
+                    orderCount: orderCountEl ? orderCountEl.innerText.trim() : '0',
+                    rating: ratingEl ? ratingEl.innerText.trim() : 'N/A',
+                    link: el.querySelector('a') ? el.querySelector('a').href : 'N/A',
+                    scraped_at: new Date().toISOString()
+                };
+            }).filter(product => product !== null);
+        }, { minOrderCount });
 
-    async exportToJson(products) {
-        const jsonOutput = {
+        // Close browser
+        await browser.close();
+
+        // Prepare response
+        const result = {
             metadata: {
-                search_term: this.options.searchTerm,
-                min_price: this.options.minPrice,
-                max_price: this.options.maxPrice,
-                min_order_count: this.options.minOrderCount,
+                search_term: searchTerm,
+                min_price: minPrice,
+                max_price: maxPrice,
+                min_order_count: minOrderCount,
                 total_products: products.length,
                 scraped_at: new Date().toISOString()
             },
             products: products
         };
 
-        try {
-            await fs.writeFile(
-                this.options.outputFile,
-                JSON.stringify(jsonOutput, null, 2)
-            );
-            console.log(`JSON Export completed: ${this.options.outputFile}`);
-        } catch (error) {
-            console.error('JSON export error:', error);
-        }
-
-        return jsonOutput;
-    }
-
-    async run() {
-        const products = await this.scrapeProducts();
-        return await this.exportToJson(products);
-    }
-}
-
-// Example usage
-async function main() {
-    const scraper = new AliExpressScraper({
-        searchTerm: 'smartphone',
-        minPrice: 100,
-        maxPrice: 500,
-        minOrderCount: 50,
-        maxPages: 3,
-        outputFile: 'aliexpress_smartphones.json'
-    });
-
-    try {
-        const result = await scraper.run();
-        console.log(`Scraped ${result.products.length} products`);
-      //  console.log(JSON.stringify(result, null, 2));
-      return JSON.stringify(result, null, 2);
+        // Send response
+        return res.status(200).json(result);
     } catch (error) {
-        console.error('Scraping failed:', error);
+        console.error('Scraping error:', error);
+        return res.status(500).json({ 
+            error: 'Scraping failed', 
+            details: error instanceof Error ? error.message : 'Unknown error' 
+        });
     }
 }
-
-main();
-
-module.exports = AliExpressScraper;
