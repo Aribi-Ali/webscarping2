@@ -1,0 +1,15 @@
+{
+  "name": "aliexpressscarper",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "aribi ali aek",
+  "license": "ISC",
+  "description": "a project for scarping aliexpress projects",
+  "dependencies": {
+    "puppeteer": "^23.9.0"
+  }
+}
