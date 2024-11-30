@@ -1,5 +1,6 @@
 {
   "repository": "https://github.com/vercel/examples.git",
+    ,"main": "/api/index.js",
   "license": "MIT",
   "private": true,
   "devDependencies": {
